@@ -92,8 +92,6 @@ UNet_Encoder = UNet2DConditionModel_ref.from_pretrained(
     torch_dtype=torch.float16,
 )
 
-parsing_model = Parsing(0)
-openpose_model = OpenPose(0)
 
 UNet_Encoder.requires_grad_(False)
 image_encoder.requires_grad_(False)
@@ -123,39 +121,16 @@ pipe = TryonPipeline.from_pretrained(
 )
 pipe.unet_encoder = UNet_Encoder
 
-def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_steps,seed):
+def start_tryon(dict,garm_img,garment_des,mask,denoise_steps,seed):
     
-    openpose_model.preprocessor.body_estimation.model.to(device)
     pipe.to(device)
     pipe.unet_encoder.to(device)
+    original_size = mask.size
 
     garm_img= garm_img.convert("RGB").resize((768,1024))
-    human_img_orig = dict["background"].convert("RGB")    
-    
-    if is_checked_crop:
-        width, height = human_img_orig.size
-        target_width = int(min(width, height * (3 / 4)))
-        target_height = int(min(height, width * (4 / 3)))
-        left = (width - target_width) / 2
-        top = (height - target_height) / 2
-        right = (width + target_width) / 2
-        bottom = (height + target_height) / 2
-        cropped_img = human_img_orig.crop((left, top, right, bottom))
-        crop_size = cropped_img.size
-        human_img = cropped_img.resize((768,1024))
-    else:
-        human_img = human_img_orig.resize((768,1024))
-
-
-    if is_checked:
-        keypoints = openpose_model(human_img.resize((384,512)))
-        model_parse, _ = parsing_model(human_img.resize((384,512)))
-        mask, mask_gray = get_mask_location('hd', "upper_body", model_parse, keypoints)
-        mask = mask.resize((768,1024))
-    else:
-        mask = pil_to_binary_mask(dict['layers'][0].convert("RGB").resize((768, 1024)))
-        # mask = transforms.ToTensor()(mask)
-        # mask = mask.unsqueeze(0)
+    human_img_orig = dict.convert("RGB")
+    human_img = human_img_orig.resize((768,1024))
+    mask = pil_to_binary_mask(mask.convert("RGB").resize((768, 1024)))
     mask_gray = (1-transforms.ToTensor()(mask)) * tensor_transfrom(human_img)
     mask_gray = to_pil_image((mask_gray+1.0)/2.0)
 
@@ -233,12 +208,7 @@ def start_tryon(dict,garm_img,garment_des,is_checked,is_checked_crop,denoise_ste
                         guidance_scale=2.0,
                     )[0]
 
-    if is_checked_crop:
-        out_img = images[0].resize(crop_size)        
-        human_img_orig.paste(out_img, (int(left), int(top)))    
-        return human_img_orig, mask_gray
-    else:
-        return images[0], mask_gray
+    return images[0].resize(original_size), mask_gray.resize(original_size)
     # return images[0], mask_gray
 
 garm_list = os.listdir(os.path.join(example_path,"cloth"))
@@ -260,31 +230,17 @@ for ex_human in human_list_path:
 
 image_blocks = gr.Blocks().queue()
 with image_blocks as demo:
-    gr.Markdown("## IDM-VTON 👕👔👚")
-    gr.Markdown("Virtual Try-on with your image and garment image. Check out the [source codes](https://github.com/yisol/IDM-VTON) and the [model](https://huggingface.co/yisol/IDM-VTON)")
+    gr.Markdown("Virtual Try-on with original image, black and white mask, and garment image.")
     with gr.Row():
         with gr.Column():
-            imgs = gr.ImageEditor(sources='upload', type="pil", label='Human. Mask with pen or use auto-masking', interactive=True)
-            with gr.Row():
-                is_checked = gr.Checkbox(label="Yes", info="Use auto-generated mask (Takes 5 seconds)",value=True)
-            with gr.Row():
-                is_checked_crop = gr.Checkbox(label="Yes", info="Use auto-crop & resizing",value=False)
-
-            example = gr.Examples(
-                inputs=imgs,
-                examples_per_page=10,
-                examples=human_ex_list
-            )
+            imgs = gr.Image(label="Human", sources=['upload'], type="pil", elem_id="image_upload")
+            mask_upload = gr.Image(label="Mask", sources=['upload'], type="pil", elem_id="mask_upload")
 
         with gr.Column():
             garm_img = gr.Image(label="Garment", sources='upload', type="pil")
             with gr.Row(elem_id="prompt-container"):
                 with gr.Row():
                     prompt = gr.Textbox(placeholder="Description of garment ex) Short Sleeve Round Neck T-shirts", show_label=False, elem_id="prompt")
-            example = gr.Examples(
-                inputs=garm_img,
-                examples_per_page=8,
-                examples=garm_list_path)
         with gr.Column():
             # image_out = gr.Image(label="Output", elem_id="output-img", height=400)
             masked_img = gr.Image(label="Masked image output", elem_id="masked-img",show_share_button=False)
@@ -304,10 +260,10 @@ with image_blocks as demo:
 
 
 
-    try_button.click(fn=start_tryon, inputs=[imgs, garm_img, prompt, is_checked,is_checked_crop, denoise_steps, seed], outputs=[image_out,masked_img], api_name='tryon')
+    try_button.click(fn=start_tryon, inputs=[imgs, garm_img, prompt, mask_upload, denoise_steps, seed], outputs=[image_out,masked_img], api_name='tryon')
 
             
 
 
-image_blocks.launch()
+image_blocks.launch(server_name="0.0.0.0", server_port=7865, share=False)
 
